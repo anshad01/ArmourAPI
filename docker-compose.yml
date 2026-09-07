@@ -1,0 +1,105 @@
+version: "3.8"
+
+services:
+  juice-shop:
+    image: bkimminich/juice-shop
+    container_name: juice-shop
+    ports:
+      - "3000:3000"
+
+  dvga:
+    image: dolevf/dvga
+    container_name: dvga
+    environment:
+      - WEB_HOST=0.0.0.0
+    ports:
+      - "5013:5013"
+
+  # AndroGoat has no official Docker image - it ships as an Android app + local
+  # backend service. Host its backend manually on port 5000 (see Phase 1 in the
+  # plan) or point ANDROGOAT_URL at wherever you end up running it.
+
+  # FR9 fallback WAF engine (WAF_ENGINE=nginx-modsecurity): official OWASP
+  # image, so this is genuinely "NGINX + ModSecurity + CRS", not a
+  # reimplementation. Used purely as a decision oracle - src/waf/nginx-
+  # modsecurity-adapter.js sends it the same request ArmourAPI received and
+  # reads back allow/block from the response status; it never sits in the
+  # real traffic path to Juice Shop/DVGA/AndroGoat. httpbin is its "backend"
+  # only because NGINX needs somewhere to send requests it allows through -
+  # that response is discarded, only the status code matters to us.
+  httpbin:
+    image: kennethreitz/httpbin
+    container_name: armourapi-httpbin
+
+  nginx-modsecurity:
+    image: owasp/modsecurity-crs:nginx
+    container_name: armourapi-nginx-modsecurity
+    environment:
+      - BACKEND=http://httpbin:80
+      - PARANOIA=1
+      - ANOMALY_INBOUND=5
+    ports:
+      - "8081:8080"
+    depends_on:
+      - httpbin
+
+  redis:
+    image: redis:7-alpine
+    container_name: armourapi-redis
+    ports:
+      - "6379:6379"
+
+  prometheus:
+    image: prom/prometheus
+    container_name: armourapi-prometheus
+    volumes:
+      - ./ops/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana
+    container_name: armourapi-grafana
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/etc/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+  # FR7's "pino -> ELK stack": ArmourAPI writes structured JSON logs to
+  # ./logs/armourapi.log (set LOG_FILE - see .env.example) when running on
+  # the host; Filebeat tails that same path via the bind mount below and
+  # ships to Elasticsearch. Single-node, security disabled - local/demo
+  # only, matches NFR4's isolated sandbox, not a hardened deployment.
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.0
+    container_name: armourapi-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.15.0
+    container_name: armourapi-kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.15.0
+    container_name: armourapi-filebeat
+    user: root
+    command: ["--strict.perms=false"]
+    volumes:
+      - ./ops/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - ./logs:/var/log/armourapi:ro
+    depends_on:
+      - elasticsearch

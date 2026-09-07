@@ -1,0 +1,28 @@
+{
+  "name": "armour-api",
+  "version": "0.1.0",
+  "description": "ArmourAPI - reverse-proxy API security gateway (WAF + GraphQL guard + rate limiter + schema validator)",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "@coraza/core": "^0.1.0-preview.3",
+    "@coraza/coreruleset": "^0.1.0-preview.2",
+    "@coraza/fastify": "^0.1.0-preview.3",
+    "@fastify/helmet": "^12.0.0",
+    "@fastify/http-proxy": "^11.6.1",
+    "@fastify/websocket": "^11.0.0",
+    "fastify": "^5.0.0",
+    "graphql": "^16.14.2",
+    "ioredis": "^5.4.1",
+    "jsonwebtoken": "^9.0.2",
+    "pino": "^9.0.0",
+    "pino-http": "^10.0.0",
+    "prom-client": "^15.1.0",
+    "rate-limiter-flexible": "^5.0.3",
+    "zod": "^3.23.8"
+  }
+}

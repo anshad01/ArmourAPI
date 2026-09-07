@@ -1,0 +1,20 @@
+filebeat.inputs:
+  - type: filestream
+    id: armourapi-logs
+    paths:
+      - /var/log/armourapi/*.log
+    parsers:
+      - ndjson:
+          target: ""
+          overwrite_keys: true
+          add_error_key: true
+
+output.elasticsearch:
+  hosts: ["http://elasticsearch:9200"]
+  index: "armourapi-logs-%{+yyyy.MM.dd}"
+
+setup.template.name: "armourapi-logs"
+setup.template.pattern: "armourapi-logs-*"
+setup.ilm.enabled: false
+
+logging.level: info

@@ -1,0 +1,875 @@
+{
+  "info": {
+    "name": "ArmourAPI Attack Corpus",
+    "description": "Versioned attack corpus, one folder per threat-matrix row (doc Section 4.3), numbered to match that section. Execution order differs from the numbering: folder 3 (Brute Force & Credential Stuffing) runs LAST because it deliberately blocklists its own source IP, which would otherwise contaminate every later folder sharing that IP. Run against the \"protected\" environment (through ArmourAPI) to verify blocking; run the same payloads against the \"baseline\" environment (direct to each real target) once Docker/testbeds are available, and diff the two - that diff is the Validation Test Report deliverable (doc Section 6). Folders 1, 4, 5, and 6 include KNOWN GAP / NOTE comments where current coverage is partial or untested - do not report those as fully mitigated.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "0. Setup",
+      "item": [
+        {
+          "name": "Login (capture ArmourAPI session token)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"login reachable\", function () { pm.response.to.not.be.error; });",
+                  "const token = pm.response.headers.get('X-ArmourAPI-Access-Token');",
+                  "if (token) { pm.environment.set('access_token', token); }",
+                  "pm.test(\"access token issued\", function () { pm.expect(token).to.be.a('string'); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"email\":\"attacker-corpus@test.com\",\"password\":\"whatever-upstream-accepts\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "1. BOLA-IDOR (API1:2023)",
+      "item": [
+        {
+          "name": "Sequential order ID enumeration - /orders/1042",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"auth required and present -> not auth-rejected\", function () {",
+                  "  const body = pm.response.body ? pm.response.json() : {};",
+                  "  pm.expect(['auth-missing','auth-invalid','auth-revoked']).to.not.include(body.category);",
+                  "});",
+                  "// KNOWN GAP: ArmourAPI requires *a* valid token on this route (FR6) but does not",
+                  "// verify the token's subject owns order 1042 (object-level ownership matching is",
+                  "// not implemented - see Phase 7 notes). This request is expected to pass the",
+                  "// gateway either way; true BOLA prevention would need to happen at the upstream",
+                  "// or via an ownership-aware authorization layer not yet built."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/orders/1042"
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Mass Assignment & Price Tampering (API3:2023)",
+      "item": [
+        {
+          "name": "Doc's exact payload: inject price into checkout",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"blocked with 403\", function () { pm.response.to.have.status(403); });",
+                  "pm.test(\"category is schema-violation\", function () {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.category).to.eql(\"schema-violation\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/checkout",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"items\":[{\"item_id\":12,\"price\":0.01,\"quantity\":1}]}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Discount >100% override injection",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"blocked with 403\", function () { pm.response.to.have.status(403); });",
+                  "pm.test(\"category is schema-violation\", function () {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.category).to.eql(\"schema-violation\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/discounts/apply",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"code\":\"WELCOME10\",\"percentage\":150}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Inventory privilege-escalation field injection",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"blocked with 403\", function () { pm.response.to.have.status(403); });",
+                  "pm.test(\"category is schema-violation\", function () {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.category).to.eql(\"schema-violation\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/inventory/42",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"quantity\":10,\"role\":\"admin\",\"approved_by\":null}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Broken Function Level Authorization - BFLA (API5:2023)",
+      "item": [
+        {
+          "name": "Any authenticated role can hit inventory update (no role check)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"request passes through (NOT MITIGATED: no RBAC route enforcement built - any valid token passes, regardless of role)\", function () {",
+                  "  pm.expect(pm.response.code).to.not.eql(403);",
+                  "});",
+                  "// KNOWN GAP: token-guard.js verifies a valid, non-revoked token but does not",
+                  "// check claims.role against the route. request.armourapiUser.role is populated",
+                  "// and available for a future @RequireRoles('Manager')-style layer, but that",
+                  "// layer was not built (out of FR6's scope, which covers token/session",
+                  "// mechanics, not authorization policy). Do not report this class as mitigated."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/inventory/99",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"quantity\":5,\"reason\":\"correction\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. SSRF (API7:2023)",
+      "item": [
+        {
+          "name": "Internal metadata IP in a request field (generic WAF pattern check)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"code field pattern rejected by schema (alphanumeric only)\", function () {",
+                  "  pm.response.to.have.status(403);",
+                  "});",
+                  "// NOTE: this only proves the discount code's regex rejects URL-shaped input,",
+                  "// not that ArmourAPI performs SSRF egress filtering. The doc's SSRF scenario",
+                  "// (a webhook/receipt-delivery URL field) has no corresponding endpoint in the",
+                  "// current build - Section 3's endpoint table doesn't define one. This test",
+                  "// class is NOT meaningfully exercised yet; flagged as untested, not mitigated."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/discounts/apply",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"code\":\"http://169-254-169-254-metadata\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. API Abuse - High-Frequency Scraping (API4:2023)",
+      "item": [
+        {
+          "name": "Rapid catalog scrape request 1/5",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"reachable\", function () { pm.response.to.not.be.error; });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/api/v1/products"
+          }
+        },
+        {
+          "name": "Rapid catalog scrape request 2/5",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"reachable\", function () { pm.response.to.not.be.error; });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/api/v1/products"
+          }
+        },
+        {
+          "name": "Rapid catalog scrape request 3/5",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"reachable\", function () { pm.response.to.not.be.error; });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/api/v1/products"
+          }
+        },
+        {
+          "name": "Rapid catalog scrape request 4/5",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"reachable\", function () { pm.response.to.not.be.error; });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/api/v1/products"
+          }
+        },
+        {
+          "name": "Rapid catalog scrape request 5/5",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"reachable\", function () { pm.response.to.not.be.error; });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/api/v1/products"
+          }
+        }
+      ]
+    },
+    {
+      "name": "8. Injection - SQLi-NoSQLi-Command (API8:2023)",
+      "item": [
+        {
+          "name": "Doc's exact payload: SQLi in discount code field",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"blocked with 403\", function () { pm.response.to.have.status(403); });",
+                  "pm.test(\"category is sqli\", function () {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.category).to.eql(\"sqli\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{base_url}}/app/rest/products/search?q=%27%20OR%20%271%27%3D%271"
+          }
+        },
+        {
+          "name": "XSS payload in JSON body",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"blocked with 403\", function () { pm.response.to.have.status(403); });",
+                  "pm.test(\"category is schema-violation or xss (either layer is valid)\", function () {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(['schema-violation', 'xss']).to.include(body.category);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/discounts/apply",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"code\":\"<script>alert(1)</script>\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "NoSQL injection via object-typed password",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"blocked with 403\", function () { pm.response.to.have.status(403); });",
+                  "pm.test(\"category is schema-violation\", function () {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.category).to.eql(\"schema-violation\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"email\":\"x@test.com\",\"password\":{\"$ne\":null}}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Credential-Token Theft & Hijacking (API2:2023)",
+      "item": [
+        {
+          "name": "Malformed/tampered JWT rejected",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"blocked with 403\", function () { pm.response.to.have.status(403); });",
+                  "pm.test(\"category is auth-invalid\", function () {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.category).to.eql(\"auth-invalid\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer not.a.valid.jwt"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/checkout",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"items\":[{\"item_id\":1,\"quantity\":1}]}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Revoked token rejected after logout",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"logout succeeds\", function () { pm.response.to.have.status(200); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/auth/logout"
+          }
+        },
+        {
+          "name": "Reuse of now-revoked token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"blocked with 403\", function () { pm.response.to.have.status(403); });",
+                  "pm.test(\"category is auth-revoked\", function () {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.category).to.eql(\"auth-revoked\");",
+                  "});",
+                  "// NOTE: this proves revocation works. The doc's fuller scenario (an \"Impossible",
+                  "// Travel\" alert from IP/geo/device-fingerprint anomaly) is NOT implemented -",
+                  "// only explicit revocation is. Flagged as a partial mitigation."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/checkout",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"items\":[{\"item_id\":1,\"quantity\":1}]}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Brute Force & Credential Stuffing (API4:2023)",
+      "item": [
+        {
+          "name": "Failed login attempt 1/6",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"attempt 1 not yet blocklisted\", function () { pm.expect(pm.response.code).to.not.eql(403); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"email\":\"victim@corpus-test.com\",\"password\":\"guess-1\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Failed login attempt 2/6",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"attempt 2 not yet blocklisted\", function () { pm.expect(pm.response.code).to.not.eql(403); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"email\":\"victim@corpus-test.com\",\"password\":\"guess-2\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Failed login attempt 3/6",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"attempt 3 not yet blocklisted\", function () { pm.expect(pm.response.code).to.not.eql(403); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"email\":\"victim@corpus-test.com\",\"password\":\"guess-3\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Failed login attempt 4/6",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"attempt 4 not yet blocklisted\", function () { pm.expect(pm.response.code).to.not.eql(403); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"email\":\"victim@corpus-test.com\",\"password\":\"guess-4\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Failed login attempt 5/6",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"attempt 5 not yet blocklisted\", function () { pm.expect(pm.response.code).to.not.eql(403); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"email\":\"victim@corpus-test.com\",\"password\":\"guess-5\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Failed login attempt 6/6",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"threshold breach -> blocklisted on next attempt (see attempt 7)\", function () {",
+                  "  pm.expect(pm.response.code).to.not.eql(403);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"email\":\"victim@corpus-test.com\",\"password\":\"guess-6\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "Attempt 7 - expect blocklisted",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"blocked with 403\", function () { pm.response.to.have.status(403); });",
+                  "pm.test(\"category is blocklisted\", function () {",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.category).to.eql(\"blocklisted\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{base_url}}/api/v1/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"email\":\"victim@corpus-test.com\",\"password\":\"guess-7\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
