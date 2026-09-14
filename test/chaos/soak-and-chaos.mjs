@@ -85,9 +85,10 @@ async function fireOne() {
   const start = process.hrtime.bigint();
   try {
     // AndroGoat (the /api/v1 upstream) isn't running in this dev setup, so a
-    // healthy ArmourAPI legitimately returns 502 here (it scanned the
-    // request and tried to forward it - the upstream is what's missing, not
-    // ArmourAPI). What this experiment measures is ArmourAPI's OWN
+    // healthy ArmourAPI legitimately returns 500 here (@fastify/http-proxy's
+    // FST_REPLY_FROM_INTERNAL_SERVER_ERROR - it scanned the request and
+    // tried to forward it; the upstream is what's missing, not ArmourAPI).
+    // What this experiment measures is ArmourAPI's OWN
     // availability, so any HTTP response at all (whatever its status) means
     // ArmourAPI itself answered; only a failed *connection to ArmourAPI* -
     // fetch throwing - counts as ArmourAPI being down.
