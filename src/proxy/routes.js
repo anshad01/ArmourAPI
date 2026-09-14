@@ -11,6 +11,7 @@ import {
 } from '../rate-limiter/index.js';
 import { createSchemaGuard } from '../validation/index.js';
 import { createTokenGuard } from '../auth/token-guard.js';
+import { createFastFilter } from '../waf/fast-filter.js';
 import { attachSessionOnLoginSuccess } from '../auth/session-hooks.js';
 import { recordThreat } from '../security-api/threat-store.js';
 import { publishTraffic } from '../security-api/traffic-bus.js';
@@ -28,7 +29,7 @@ function createGatePreHandler(scanner) {
     const result = await scanner.scan(request);
     const latencyMs = Number(process.hrtime.bigint() - start) / 1e6;
 
-    requestLatency.observe({ route: request.routeOptions?.url || request.url }, latencyMs);
+    requestLatency.observe({ route: request.routeOptions?.url || request.url, scanner: scanner.name }, latencyMs);
 
     if (!result.allow) {
       requestCounter.inc({ route: request.url, decision: 'block' });
@@ -101,6 +102,12 @@ function chain(...scanners) {
 }
 
 export async function registerProxyRoutes(fastify, { adapter }) {
+  // "Mode 1: Fast Inline Drop" (Parameters.rtf.doc) - runs first, ahead of
+  // even the blocklist check, matching the doc's own pipeline order
+  // (ingestion -> fast-path regex -> deeper stages). Catches only
+  // near-certain attack signatures, so it never spends a Coraza transaction
+  // on the obvious cases.
+  const fastFilter = createFastFilter();
   const blocklistGuard = createBlocklistGuard();
   const rateLimitGuard = createGlobalRateLimitGuard();
   const graphqlGuard = createGraphqlGuard();
@@ -111,7 +118,7 @@ export async function registerProxyRoutes(fastify, { adapter }) {
   await fastify.register(httpProxy, {
     upstream: config.targets.juiceShop,
     prefix: '/app',
-    preHandler: chain(blocklistGuard, rateLimitGuard, adapter),
+    preHandler: chain(fastFilter, blocklistGuard, rateLimitGuard, adapter),
   });
 
   await fastify.register(httpProxy, {
@@ -119,7 +126,7 @@ export async function registerProxyRoutes(fastify, { adapter }) {
     prefix: '/graphql',
     // FR3 checks run before the generic WAF scan, so a malformed/oversized
     // query is rejected cheaply without spending a WAF transaction on it.
-    preHandler: chain(blocklistGuard, rateLimitGuard, graphqlGuard, adapter),
+    preHandler: chain(fastFilter, blocklistGuard, rateLimitGuard, graphqlGuard, adapter),
   });
 
   // Registered ahead of the general /api/v1 prefix below so the login-
@@ -137,7 +144,7 @@ export async function registerProxyRoutes(fastify, { adapter }) {
       // FR5 runs before loginGuard/WAF: reject a malformed/injected login
       // body cheaply before spending a WAF transaction or touching the
       // credential-stuffing counters.
-      preHandler: chain(blocklistGuard, rateLimitGuard, schemaGuard, loginGuard, adapter),
+      preHandler: chain(fastFilter, blocklistGuard, rateLimitGuard, schemaGuard, loginGuard, adapter),
     });
   });
 
@@ -148,6 +155,6 @@ export async function registerProxyRoutes(fastify, { adapter }) {
     // authenticate first, then validate payload shape, then WAF-scan
     // content. tokenGuard/schemaGuard both no-op (allow: true) on paths
     // they don't have a rule for, so /products stays public.
-    preHandler: chain(blocklistGuard, rateLimitGuard, tokenGuard, schemaGuard, adapter),
+    preHandler: chain(fastFilter, blocklistGuard, rateLimitGuard, tokenGuard, schemaGuard, adapter),
   });
 }

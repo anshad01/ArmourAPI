@@ -1,7 +1,7 @@
 import { RateLimiterRedis, RateLimiterMemory } from 'rate-limiter-flexible';
 import { redis } from '../redis/client.js';
 import { bufferRequestBody } from '../proxy/body-buffer.js';
-import { isBlocked, recordViolationAndEscalate } from './blocklist.js';
+import { isBlocked, recordViolationAndEscalate, isJailed, placeInJail, releaseFromJail } from './blocklist.js';
 
 /**
  * FR4: rate-limit and flag credential-stuffing/brute-force patterns on auth
@@ -22,6 +22,16 @@ const LOGIN_FAIL_DURATION_SECONDS = Number(process.env.RATE_LIMIT_LOGIN_FAIL_DUR
 const BASE_BLOCK_SECONDS = 30;
 const MAX_BLOCK_SECONDS = 900; // 15 min
 
+// "Mode 3: Adaptive Rate Jail" (Parameters.rtf.doc): the doc's "5
+// requests/10 seconds" degraded-tier figure, applied for JAIL_TTL_SECONDS
+// once a caller first crosses the login-failure threshold - a quarantine,
+// not an immediate hard cut-off. Only breaching *this* stricter limit (or
+// re-breaching the login-failure threshold) while still jailed escalates to
+// the existing doubling-duration hard block.
+const JAIL_POINTS = Number(process.env.RATE_LIMIT_JAIL_POINTS || 5);
+const JAIL_DURATION_SECONDS = Number(process.env.RATE_LIMIT_JAIL_DURATION || 10);
+const JAIL_TTL_SECONDS = Number(process.env.RATE_LIMIT_JAIL_TTL || 120);
+
 const globalLimiter = new RateLimiterRedis({
   storeClient: redis,
   keyPrefix: 'rl:global',
@@ -39,6 +49,14 @@ const loginFailureLimiter = new RateLimiterRedis({
     points: LOGIN_FAIL_POINTS,
     duration: LOGIN_FAIL_DURATION_SECONDS,
   }),
+});
+
+const jailLimiter = new RateLimiterRedis({
+  storeClient: redis,
+  keyPrefix: 'rl:jail',
+  points: JAIL_POINTS,
+  duration: JAIL_DURATION_SECONDS,
+  insuranceLimiter: new RateLimiterMemory({ points: JAIL_POINTS, duration: JAIL_DURATION_SECONDS }),
 });
 
 // Common field names across the sort of login payloads Juice Shop/AndroGoat
@@ -74,6 +92,35 @@ export function createBlocklistGuard() {
       if (account && (await isBlocked('account', account))) {
         return { allow: false, category: 'blocklisted', reason: 'Account is temporarily blocklisted' };
       }
+
+      // "Mode 3: Adaptive Rate Jail" - IP only, since request.armourapiAccount
+      // isn't resolved yet at this point in the chain for the login route
+      // (loginGuard, which extracts it from the body, runs after this guard -
+      // an honest limitation, not a gap that matters for IP-shaped abuse).
+      // A jailed IP isn't cut off; it's held to a much stricter secondary
+      // limit, and only exceeding *that* escalates to a real hard block.
+      if (await isJailed('ip', request.ip)) {
+        try {
+          await jailLimiter.consume(request.ip);
+        } catch {
+          const { violationCount, blockedForSeconds } = await recordViolationAndEscalate('ip', request.ip, {
+            reason: `exceeded adaptive rate jail limit (${JAIL_POINTS} req/${JAIL_DURATION_SECONDS}s)`,
+            baseBlockSeconds: BASE_BLOCK_SECONDS,
+            maxBlockSeconds: MAX_BLOCK_SECONDS,
+          });
+          await releaseFromJail('ip', request.ip);
+          request.log.warn(
+            { ip: request.ip, violationCount, blockedForSeconds },
+            'armourapi_rate_jail_escalated',
+          );
+          return {
+            allow: false,
+            category: 'rate-jail-escalated',
+            reason: `Exceeded adaptive rate jail limit; hard-blocked for ${blockedForSeconds}s`,
+          };
+        }
+      }
+
       return { allow: true };
     },
   };
@@ -140,15 +187,25 @@ export async function recordLoginOutcome(request, reply) {
     try {
       await loginFailureLimiter.consume(value);
     } catch {
-      const { violationCount, blockedForSeconds } = await recordViolationAndEscalate(type, value, {
-        reason: 'credential-stuffing/brute-force threshold exceeded',
-        baseBlockSeconds: BASE_BLOCK_SECONDS,
-        maxBlockSeconds: MAX_BLOCK_SECONDS,
-      });
-      request.log.warn(
-        { type, value, violationCount, blockedForSeconds },
-        'armourapi_credential_stuffing_blocklisted',
-      );
+      // First threshold breach: quarantine into the degraded jail tier
+      // rather than an immediate hard block ("Mode 3: Adaptive Rate Jail").
+      // A second breach while still jailed means the caller kept failing
+      // logins through the quarantine window - that's when it escalates.
+      if (await isJailed(type, value)) {
+        const { violationCount, blockedForSeconds } = await recordViolationAndEscalate(type, value, {
+          reason: 'repeated credential-stuffing/brute-force threshold breach while jailed',
+          baseBlockSeconds: BASE_BLOCK_SECONDS,
+          maxBlockSeconds: MAX_BLOCK_SECONDS,
+        });
+        await releaseFromJail(type, value);
+        request.log.warn(
+          { type, value, violationCount, blockedForSeconds },
+          'armourapi_credential_stuffing_blocklisted',
+        );
+      } else {
+        await placeInJail(type, value, { ttlSeconds: JAIL_TTL_SECONDS });
+        request.log.warn({ type, value, ttlSeconds: JAIL_TTL_SECONDS }, 'armourapi_adaptive_rate_jail_entered');
+      }
     }
   }
 }

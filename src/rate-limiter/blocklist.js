@@ -8,7 +8,9 @@ import { redis } from '../redis/client.js';
  * POST /api/v1/security/blocklist admin endpoint.
  */
 const PREFIX = 'armourapi:blocklist:';
+const JAIL_PREFIX = 'armourapi:jail:';
 const memoryStore = new Map(); // key -> { expiresAt: number, reason: string }
+const memoryJail = new Map(); // key -> { expiresAt: number }
 
 function memoryKey(type, value) {
   return `${type}:${value}`;
@@ -76,6 +78,57 @@ export async function recordViolationAndEscalate(
   const ttlSeconds = Math.min(maxBlockSeconds, baseBlockSeconds * 2 ** (count - 1));
   await block(type, value, { reason, ttlSeconds });
   return { violationCount: count, blockedForSeconds: ttlSeconds };
+}
+
+/**
+ * "Mode 3: Adaptive Rate Jail" (Parameters.rtf.doc): a degraded quarantine
+ * tier between "fully allowed" and "hard blocked". A caller placed here
+ * isn't cut off - createBlocklistGuard subjects it to a much stricter
+ * secondary rate limit (rate-limiter/index.js's jailLimiter) for ttlSeconds;
+ * only exceeding *that* escalates to a real block via
+ * recordViolationAndEscalate. Same Redis-with-memory-fallback shape as the
+ * hard blocklist above, deliberately kept as a separate key space (jail and
+ * hard-block are different states a caller can be in, not the same thing at
+ * different severities).
+ */
+export async function placeInJail(type, value, { ttlSeconds = 120 } = {}) {
+  const key = memoryKey(type, value);
+  memoryJail.set(key, { expiresAt: Date.now() + ttlSeconds * 1000 });
+  try {
+    await redis.set(JAIL_PREFIX + key, '1', 'EX', ttlSeconds);
+  } catch {
+    // Redis unavailable - the in-memory entry above still enforces the jail
+    // on this instance.
+  }
+}
+
+export async function isJailed(type, value) {
+  const key = memoryKey(type, value);
+
+  try {
+    const hit = await redis.exists(JAIL_PREFIX + key);
+    if (hit) return true;
+  } catch {
+    // fall through to memory check below
+  }
+
+  const entry = memoryJail.get(key);
+  if (isExpired(entry)) {
+    memoryJail.delete(key);
+    return false;
+  }
+  return true;
+}
+
+/** Called when a jailed caller escalates to a hard block - no need to keep tracking both states. */
+export async function releaseFromJail(type, value) {
+  const key = memoryKey(type, value);
+  memoryJail.delete(key);
+  try {
+    await redis.del(JAIL_PREFIX + key);
+  } catch {
+    // best-effort - the in-memory delete above is enough on this instance
+  }
 }
 
 /** Best-effort listing for the admin API - reflects only entries this instance knows about. */

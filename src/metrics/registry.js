@@ -41,7 +41,11 @@ export const blockedCounter = new client.Counter({
 export const requestLatency = new client.Histogram({
   name: 'armourapi_request_latency_ms',
   help: 'Request latency added by ArmourAPI in milliseconds',
-  labelNames: ['route'],
-  buckets: [1, 5, 10, 25, 50, 100, 250, 500],
+  // "scanner" (13.4, Parameters.rtf.doc's per-stage Latency Profiler ask):
+  // createGatePreHandler observes once per scanner in the chain already, so
+  // labeling by which one (fast-filter/blocklist/rate-limiter/coraza/...)
+  // costs nothing new to collect - it was already being thrown away.
+  labelNames: ['route', 'scanner'],
+  buckets: [0.05, 0.1, 0.25, 0.5, 1, 5, 10, 25, 50, 100, 250, 500],
   registers: [registry],
 });
