@@ -12,4 +12,10 @@ export const config = {
     secret: process.env.JWT_SECRET || 'change-me',
     accessTtl: process.env.JWT_ACCESS_TTL || '15m',
   },
+  // Shared-secret gate for ArmourAPI's own admin/security API (ARM-01 audit
+  // finding: these routes had zero auth - anyone reaching the gateway could
+  // write arbitrary blocklist entries or read live threat data). A single
+  // header check is enough for this project's scope - no need for a second
+  // full auth system alongside the gateway-session JWTs above.
+  adminApiKey: process.env.ADMIN_API_KEY || 'change-me-admin-key',
 };

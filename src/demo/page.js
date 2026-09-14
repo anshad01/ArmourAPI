@@ -47,7 +47,7 @@ export const demoPageHtml = `<!doctype html>
     <h2>XSS in JSON body <span class="badge protected">protected</span></h2>
     <p>Sends <code>&lt;script&gt;alert(1)&lt;/script&gt;</code> as a discount code.</p>
     <button onclick="firePost('xss', '/api/v1/discounts/apply', { code: '<script>alert(1)</script>' }, true)">Trigger XSS</button>
-    <p style="font-size:0.8rem;color:#64748b">(logs in first to get a session - needs a reachable upstream, i.e. Docker, or this shows auth-missing/500 instead)</p>
+    <p style="font-size:0.8rem;color:#64748b">(works standalone - the fast-filter catches &lt;script&gt; tags before auth is even checked, so no Docker/session is actually needed here)</p>
     <div id="xss-result"></div>
   </div>
 
@@ -74,8 +74,8 @@ export const demoPageHtml = `<!doctype html>
 
   <div class="card">
     <h2>Scraping burst <span class="badge protected">protected</span></h2>
-    <p>Fires 30 rapid catalog requests to show the rate limiter engage.</p>
-    <button onclick="fireScrapeBurst()">Trigger 30 rapid requests</button>
+    <p>Fires 350 rapid catalog requests to show the rate limiter engage (the default global limit is 300/60s - a 30-request burst, this card's original size, could never cross that threshold).</p>
+    <button onclick="fireScrapeBurst()">Trigger 350 rapid requests</button>
     <div id="scrape-result"></div>
   </div>
 
@@ -134,22 +134,31 @@ export const demoPageHtml = `<!doctype html>
       const el = document.getElementById('brute-result');
       el.innerHTML = '<div class="result pending">firing 7 attempts...</div>';
       const lines = [];
+      let sawUpstreamDown = false;
       for (let i = 1; i <= 7; i++) {
         const res = await fetch('/api/v1/auth/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ email: 'demo-victim@armourapi.local', password: 'guess-' + i }),
         });
+        if (res.status === 500) sawUpstreamDown = true;
         lines.push('attempt ' + i + ': HTTP ' + res.status + (res.status === 403 ? ' \\u{1F6D1} BLOCKLISTED' : ''));
       }
-      el.innerHTML = '<pre>' + lines.join('\\n') + '</pre>';
+      // ARM-05: a login failure only counts toward the threshold when the
+      // upstream itself returns 401/403 - with AndroGoat down it returns 500
+      // for every attempt instead, so the counter never moves and this demo
+      // silently shows nothing happening. Say so plainly instead.
+      const warning = sawUpstreamDown
+        ? '<div class="result" style="color:#facc15">\\u26a0\\ufe0f AndroGoat (the login upstream) isn\\u2019t reachable - start Docker to see the auto-blocklist trigger on the 7th attempt.</div>'
+        : '';
+      el.innerHTML = warning + '<pre>' + lines.join('\\n') + '</pre>';
     }
 
     async function fireScrapeBurst() {
       const el = document.getElementById('scrape-result');
-      el.innerHTML = '<div class="result pending">firing 30 requests...</div>';
+      el.innerHTML = '<div class="result pending">firing 350 requests...</div>';
       let allowed = 0, blocked = 0;
-      await Promise.all(Array.from({ length: 30 }, () =>
+      await Promise.all(Array.from({ length: 350 }, () =>
         fetch('/api/v1/products').then((res) => { res.status === 403 ? blocked++ : allowed++; })
       ));
       el.innerHTML = '<div class="result ' + (blocked > 0 ? 'blocked' : 'allowed') + '">' +

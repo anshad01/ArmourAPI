@@ -1,7 +1,14 @@
 import { RateLimiterRedis, RateLimiterMemory } from 'rate-limiter-flexible';
 import { redis } from '../redis/client.js';
 import { bufferRequestBody } from '../proxy/body-buffer.js';
-import { isBlocked, recordViolationAndEscalate, isJailed, placeInJail, releaseFromJail } from './blocklist.js';
+import {
+  isBlocked,
+  recordViolationAndEscalate,
+  isJailed,
+  placeInJail,
+  releaseFromJail,
+  withKeyLock,
+} from './blocklist.js';
 
 /**
  * FR4: rate-limit and flag credential-stuffing/brute-force patterns on auth
@@ -99,9 +106,19 @@ export function createBlocklistGuard() {
       // an honest limitation, not a gap that matters for IP-shaped abuse).
       // A jailed IP isn't cut off; it's held to a much stricter secondary
       // limit, and only exceeding *that* escalates to a real hard block.
-      if (await isJailed('ip', request.ip)) {
+      // ARM-02 fix: the whole check-then-act sequence for this IP is
+      // serialized so a burst of concurrent requests can't each read stale
+      // jail state and independently trigger their own escalation.
+      const jailOutcome = await withKeyLock('ip', request.ip, async () => {
+        // Same reasoning as recordLoginOutcome's lock below: a concurrent
+        // burst can queue up multiple turns here before any of them has
+        // escalated - once one turn hard-blocks the IP, every later turn in
+        // this same queue is a no-op rather than escalating again.
+        if (await isBlocked('ip', request.ip)) return null;
+        if (!(await isJailed('ip', request.ip))) return null;
         try {
           await jailLimiter.consume(request.ip);
+          return null;
         } catch {
           const { violationCount, blockedForSeconds } = await recordViolationAndEscalate('ip', request.ip, {
             reason: `exceeded adaptive rate jail limit (${JAIL_POINTS} req/${JAIL_DURATION_SECONDS}s)`,
@@ -109,16 +126,16 @@ export function createBlocklistGuard() {
             maxBlockSeconds: MAX_BLOCK_SECONDS,
           });
           await releaseFromJail('ip', request.ip);
-          request.log.warn(
-            { ip: request.ip, violationCount, blockedForSeconds },
-            'armourapi_rate_jail_escalated',
-          );
-          return {
-            allow: false,
-            category: 'rate-jail-escalated',
-            reason: `Exceeded adaptive rate jail limit; hard-blocked for ${blockedForSeconds}s`,
-          };
+          return { violationCount, blockedForSeconds };
         }
+      });
+      if (jailOutcome) {
+        request.log.warn({ ip: request.ip, ...jailOutcome }, 'armourapi_rate_jail_escalated');
+        return {
+          allow: false,
+          category: 'rate-jail-escalated',
+          reason: `Exceeded adaptive rate jail limit; hard-blocked for ${jailOutcome.blockedForSeconds}s`,
+        };
       }
 
       return { allow: true };
@@ -187,25 +204,44 @@ export async function recordLoginOutcome(request, reply) {
     try {
       await loginFailureLimiter.consume(value);
     } catch {
-      // First threshold breach: quarantine into the degraded jail tier
-      // rather than an immediate hard block ("Mode 3: Adaptive Rate Jail").
-      // A second breach while still jailed means the caller kept failing
-      // logins through the quarantine window - that's when it escalates.
-      if (await isJailed(type, value)) {
-        const { violationCount, blockedForSeconds } = await recordViolationAndEscalate(type, value, {
-          reason: 'repeated credential-stuffing/brute-force threshold breach while jailed',
-          baseBlockSeconds: BASE_BLOCK_SECONDS,
-          maxBlockSeconds: MAX_BLOCK_SECONDS,
-        });
-        await releaseFromJail(type, value);
-        request.log.warn(
-          { type, value, violationCount, blockedForSeconds },
-          'armourapi_credential_stuffing_blocklisted',
-        );
-      } else {
-        await placeInJail(type, value, { ttlSeconds: JAIL_TTL_SECONDS });
-        request.log.warn({ type, value, ttlSeconds: JAIL_TTL_SECONDS }, 'armourapi_adaptive_rate_jail_entered');
-      }
+      // ARM-02 fix: serialize the jail-state check-then-act per key so a
+      // burst of concurrent failed logins for the same account/IP can't
+      // each read stale state and pile up separate escalations (verified
+      // bug: 20 concurrent attempts produced 7 escalations in ~20ms instead
+      // of the intended one-per-jail-cycle).
+      await withKeyLock(type, value, async () => {
+        // A burst of N concurrent failed logins all reach this point after
+        // already having passed the blocklist guard's preHandler check (that
+        // check ran for all of them "at once", before any hard block existed
+        // to catch the later ones) - so serializing this section alone still
+        // let every queued turn ping-pong between "place in jail" and
+        // "escalate, then release the jail" and re-jail the very next turn,
+        // producing one escalation per request in the burst instead of one
+        // per burst. This check breaks that: once any turn in this SAME
+        // queue has already hard-blocked the key, every later turn is a
+        // no-op - the block already covers it, nothing more to do.
+        if (await isBlocked(type, value)) return;
+
+        // First threshold breach: quarantine into the degraded jail tier
+        // rather than an immediate hard block ("Mode 3: Adaptive Rate Jail").
+        // A second breach while still jailed means the caller kept failing
+        // logins through the quarantine window - that's when it escalates.
+        if (await isJailed(type, value)) {
+          const { violationCount, blockedForSeconds } = await recordViolationAndEscalate(type, value, {
+            reason: 'repeated credential-stuffing/brute-force threshold breach while jailed',
+            baseBlockSeconds: BASE_BLOCK_SECONDS,
+            maxBlockSeconds: MAX_BLOCK_SECONDS,
+          });
+          await releaseFromJail(type, value);
+          request.log.warn(
+            { type, value, violationCount, blockedForSeconds },
+            'armourapi_credential_stuffing_blocklisted',
+          );
+        } else {
+          await placeInJail(type, value, { ttlSeconds: JAIL_TTL_SECONDS });
+          request.log.warn({ type, value, ttlSeconds: JAIL_TTL_SECONDS }, 'armourapi_adaptive_rate_jail_entered');
+        }
+      });
     }
   }
 }

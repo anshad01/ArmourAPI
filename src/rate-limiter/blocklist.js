@@ -20,6 +20,29 @@ function isExpired(entry) {
   return !entry || entry.expiresAt <= Date.now();
 }
 
+const keyChains = new Map(); // key -> tail of that key's pending-work chain
+
+/**
+ * ARM-02 audit finding: a burst of truly-concurrent requests for the same
+ * account/IP could each read "not jailed yet" via isJailed() before any of
+ * them had written the jail state, so several would independently take the
+ * "not jailed" branch, or several would read "already jailed" and all
+ * escalate at once (verified: 20 concurrent failed logins produced 7
+ * escalations in ~20ms, 30s->60s->...->900s, instead of one). This serializes
+ * a check-then-act sequence per key so concurrent callers for the SAME
+ * key run one at a time, in arrival order; different keys never block each
+ * other. A single-process mutex is correct here because this project's
+ * actual deployment is single-node with Redis best-effort/optional - it is
+ * NOT a distributed lock, and wouldn't be safe across multiple instances.
+ */
+export function withKeyLock(type, value, fn) {
+  const key = memoryKey(type, value);
+  const tail = keyChains.get(key) || Promise.resolve();
+  const run = tail.then(fn, fn);
+  keyChains.set(key, run.catch(() => {}));
+  return run;
+}
+
 export async function block(type, value, { reason = 'manual', ttlSeconds = 900 } = {}) {
   const key = memoryKey(type, value);
   memoryStore.set(key, { expiresAt: Date.now() + ttlSeconds * 1000, reason });

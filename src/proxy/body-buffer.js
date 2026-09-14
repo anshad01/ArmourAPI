@@ -1,5 +1,22 @@
 import { Readable } from 'node:stream';
 
+// ARM-03 audit finding: @fastify/http-proxy's raw-stream body bypasses
+// Fastify's own bodyLimit entirely (that only guards the built-in JSON body
+// parser, which proxied routes never use), so an oversized body was reaching
+// Coraza's WAF transaction uncapped and dying with its own internal
+// "memoryLimit reached" error, leaked verbatim to the client. This is the
+// one place every scanner's body access actually goes through, so the cap
+// belongs here.
+const MAX_BODY_BYTES = 2 * 1024 * 1024;
+
+export class BodyTooLargeError extends Error {
+  constructor(maxBytes) {
+    super(`Request body exceeds ${maxBytes} bytes`);
+    this.code = 'ARMOURAPI_BODY_TOO_LARGE';
+    this.maxBytes = maxBytes;
+  }
+}
+
 /**
  * @fastify/http-proxy hands back the raw, unconsumed request stream as
  * `request.body` (so it can pipe it upstream without re-encoding). Any
@@ -20,9 +37,15 @@ export async function bufferRequestBody(request) {
   let buffer;
   if (!raw || typeof raw.pipe !== 'function') {
     buffer = typeof raw === 'string' || Buffer.isBuffer(raw) ? Buffer.from(raw) : undefined;
+    if (buffer && buffer.length > MAX_BODY_BYTES) throw new BodyTooLargeError(MAX_BODY_BYTES);
   } else {
     const chunks = [];
-    for await (const chunk of raw) chunks.push(chunk);
+    let total = 0;
+    for await (const chunk of raw) {
+      total += chunk.length;
+      if (total > MAX_BODY_BYTES) throw new BodyTooLargeError(MAX_BODY_BYTES);
+      chunks.push(chunk);
+    }
     buffer = Buffer.concat(chunks);
     request.body = buffer.length > 0 ? Readable.from(buffer) : undefined;
   }
